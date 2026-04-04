@@ -5,8 +5,25 @@ geodesic_thrml.bridges.pln — PLN-THRML bridge
 Adapts PLN-THRML's beta engine for use with the geodesic curriculum
 (coarse-to-fine K cascade) and controller (rule posterior precomputation).
 
+Current simplification (adequate for single-rule scope):
+    f = Σ c2w(premise_confidence)  — numerical proxy for forward reachability
+    g = exp(-‖conclusion - goal‖²) — Euclidean proxy for backward utility
+
+Whitepaper §6.1 full version (for future multi-step inference):
+    f = PLN forward chaining reachability from premises
+    g = PLN backward chaining utility toward goals
+    "implement inference as 'geodesic control': maintain both forward
+    factors (from premises) and backward factors (from goals) and move
+    along steps that progress both"
+
+Upgrade path: when PLN-THRML introduces multi-step chaining (possibly
+via trueagi-io/chaining integration), replace the numerical proxies
+with true chaining-based f and g.
+
 References:
     - pln_thrml.beta: Beta-discretized factor graphs for PLN inference
+    - Hyperon whitepaper §6.1: PLN + geodesic control
+    - Hyperon whitepaper §6.1.1: PLN control via quantale-annotated factor graphs
 """
 
 from __future__ import annotations
