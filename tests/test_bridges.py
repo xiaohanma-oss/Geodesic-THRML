@@ -8,6 +8,7 @@ from geodesic_thrml.bridges.quantimork import (
 )
 from geodesic_thrml.bridges.ecan import (
     extract_ecan_snapshot, sti_to_forward_scores,
+    extract_hjb_factors, hjb_to_rule_specs,
 )
 from geodesic_thrml.bridges.moses import (
     DemeSpec, compute_forward_reachability, compute_backward_compatibility,
@@ -91,6 +92,80 @@ class TestSTIToForwardScores:
         snap = extract_ecan_snapshot([0.0, 0.0, 0.0], ["A", "B", "C"])
         scores = sti_to_forward_scores(snap)
         np.testing.assert_allclose(scores, [1/3, 1/3, 1/3])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ECAN bridge — HJB mode (whitepaper §5.3 aligned)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestHJBFactors:
+    """HJB value function → geodesic forward/backward factors."""
+
+    def test_goal_has_highest_g(self):
+        """V=0 at goal → g highest at goal position."""
+        # 5 atoms in a ring, goal at position 2 (V=0, others V=high)
+        V = np.array([5.0, 3.0, 0.0, 3.0, 5.0])
+        ids = ["a0", "a1", "goal", "a3", "a4"]
+        factors = extract_hjb_factors(V, ids)
+        assert np.argmax(factors.g_scores) == 2  # goal position
+
+    def test_gradient_highest_near_goal(self):
+        """|∇V| largest near goal (steep descent toward V=0)."""
+        V = np.array([5.0, 3.0, 0.0, 3.0, 5.0])
+        ids = ["a0", "a1", "goal", "a3", "a4"]
+        factors = extract_hjb_factors(V, ids)
+        # Neighbors of goal (positions 1 and 3) should have high f
+        assert factors.f_scores[1] > factors.f_scores[0]
+        assert factors.f_scores[3] > factors.f_scores[4]
+
+    def test_flat_v_uniform_f(self):
+        """Flat V → zero gradient → approximately uniform f."""
+        V = np.array([1.0, 1.0, 1.0, 1.0])
+        ids = ["a", "b", "c", "d"]
+        factors = extract_hjb_factors(V, ids)
+        np.testing.assert_allclose(factors.f_scores, [0.25] * 4, atol=0.01)
+
+    def test_normalized(self):
+        V = np.array([5.0, 2.0, 0.5, 2.0, 5.0])
+        ids = [f"a{i}" for i in range(5)]
+        factors = extract_hjb_factors(V, ids)
+        assert abs(factors.f_scores.sum() - 1.0) < 1e-10
+        assert abs(factors.g_scores.sum() - 1.0) < 1e-10
+
+    def test_2d_grid_flattened(self):
+        """2D V field [1, N] should be handled correctly."""
+        V = np.array([[5.0, 2.0, 0.0, 2.0, 5.0]])  # shape [1, 5]
+        ids = [f"a{i}" for i in range(5)]
+        factors = extract_hjb_factors(V, ids)
+        assert np.argmax(factors.g_scores) == 2
+
+    def test_mismatched_length_raises(self):
+        V = np.array([1.0, 2.0, 3.0])
+        with pytest.raises(ValueError, match="atom_ids"):
+            extract_hjb_factors(V, ["a", "b"])
+
+
+class TestHJBToRuleSpecs:
+    def test_produces_rule_specs(self):
+        V = np.array([5.0, 2.0, 0.0, 2.0, 5.0])
+        ids = ["a0", "a1", "goal", "a3", "a4"]
+        specs = hjb_to_rule_specs(V, ids)
+        assert len(specs) == 5
+        assert specs[2].name == "goal"
+
+    def test_custom_costs(self):
+        V = np.array([1.0, 0.0, 1.0])
+        ids = ["a", "b", "c"]
+        specs = hjb_to_rule_specs(V, ids, atom_costs=[1.0, 10.0, 1.0])
+        assert specs[1].cost == 10.0
+
+    def test_goal_atom_highest_g(self):
+        """Goal atom (V=0) should have highest conclusion_stv[0] (= g)."""
+        V = np.array([5.0, 2.0, 0.0, 2.0, 5.0])
+        ids = ["a0", "a1", "goal", "a3", "a4"]
+        specs = hjb_to_rule_specs(V, ids)
+        g_values = [s.conclusion_stv[0] for s in specs]
+        assert np.argmax(g_values) == 2
 
 
 # ═══════════════════════════════════════════════════════════════════════════
