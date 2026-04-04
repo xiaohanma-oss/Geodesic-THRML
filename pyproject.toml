@@ -1,0 +1,38 @@
+[project]
+name = "geodesic-thrml"
+version = "0.1.0"
+description = "Geodesic inference control compiled to thermodynamic factor graphs — shared scheduling layer for PLN/QuantiMORK/ECAN/MOSES on TSU"
+authors = [{name = "Xiaohan Ma", email = "max257548@gmail.com"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = [
+    "geodesic control", "thermodynamic computing", "inference scheduling",
+    "Schrödinger bridge", "evidence conservation", "factor graph",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "jax>=0.4,<0.6",
+    "numpy>=1.24",
+]
+
+[project.urls]
+Homepage = "https://github.com/mafeifei666666/Geodesic-THRML"
+Repository = "https://github.com/mafeifei666666/Geodesic-THRML"
+Issues = "https://github.com/mafeifei666666/Geodesic-THRML/issues"
+
+[tool.setuptools.packages.find]
+include = ["geodesic_thrml*"]
+
+[project.optional-dependencies]
+pln = ["pln-thrml>=0.2"]
+thrml = ["thrml>=0.1.3,<0.3"]
+dev = ["pytest", "pln-thrml>=0.2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
