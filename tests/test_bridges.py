@@ -9,7 +9,10 @@ from geodesic_thrml.bridges.quantimork import (
 from geodesic_thrml.bridges.ecan import (
     extract_ecan_snapshot, sti_to_forward_scores,
 )
-from geodesic_thrml.bridges.moses import collect_program_skeleton_specs
+from geodesic_thrml.bridges.moses import (
+    DemeSpec, compute_forward_reachability, compute_backward_compatibility,
+    deme_specs_to_rule_specs, estimate_deme_cost,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -91,10 +94,87 @@ class TestSTIToForwardScores:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  MOSES bridge (stub)
+#  MOSES bridge (GEO-EVO)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestMOSESBridge:
-    def test_not_implemented(self):
-        with pytest.raises(NotImplementedError, match="MOSES-THRML"):
-            collect_program_skeleton_specs([], lambda x: 0.0)
+def _make_deme_spec(deme_id, n_knobs=10, fitness=0.8, acceptance=0.4, done=True):
+    return DemeSpec(
+        deme_id=deme_id, n_knobs=n_knobs, best_fitness=fitness,
+        acceptance_rate=acceptance, is_done=done,
+        best_bits=np.array([1, 0, 1, 0, 1, 0, 1, 0, 1, 0], dtype=np.int8),
+    )
+
+
+class TestForwardReachability:
+    """GEO-EVO forward factor: 'can we get there from here?'"""
+
+    def test_higher_fitness_higher_score(self):
+        specs = [_make_deme_spec("bad", fitness=0.2), _make_deme_spec("good", fitness=0.9)]
+        f = compute_forward_reachability(specs)
+        assert f[1] > f[0]
+
+    def test_normalized(self):
+        specs = [_make_deme_spec("a", fitness=0.5), _make_deme_spec("b", fitness=0.8)]
+        f = compute_forward_reachability(specs)
+        assert abs(f.sum() - 1.0) < 1e-10
+
+    def test_equal_fitness_uniform(self):
+        specs = [_make_deme_spec("a", fitness=0.5), _make_deme_spec("b", fitness=0.5)]
+        f = compute_forward_reachability(specs)
+        np.testing.assert_allclose(f[0], f[1])
+
+
+class TestBackwardCompatibility:
+    """GEO-EVO backward factor: 'is it useful for our goals?'"""
+
+    def test_with_target_fn(self):
+        specs = [_make_deme_spec("a"), _make_deme_spec("b")]
+        # Target function: prefer demes where first knob is 1
+        g = compute_backward_compatibility(specs, lambda bits: float(bits[0]))
+        assert g.shape == (2,)
+        assert abs(g.sum() - 1.0) < 1e-10
+
+    def test_proxy_healthy_acceptance(self):
+        """Without target fn, healthy acceptance rate (0.4) → higher score."""
+        specs = [
+            _make_deme_spec("stuck", acceptance=0.01),
+            _make_deme_spec("healthy", acceptance=0.4),
+            _make_deme_spec("random", acceptance=0.95),
+        ]
+        g = compute_backward_compatibility(specs)
+        assert g[1] > g[0]  # healthy > stuck
+        assert g[1] > g[2]  # healthy > random walk
+
+
+class TestDemeSpecsToRuleSpecs:
+    """Full GEO-EVO → RuleSpec conversion."""
+
+    def test_produces_rule_specs(self):
+        demes = [_make_deme_spec("d0", n_knobs=10), _make_deme_spec("d1", n_knobs=20)]
+        specs = deme_specs_to_rule_specs(demes)
+        assert len(specs) == 2
+        assert specs[0].name == "d0"
+        assert specs[1].name == "d1"
+
+    def test_demes_independent_parallel_safe(self):
+        """Different demes touch different nodes → weakness ≈ 0 → all parallel."""
+        demes = [_make_deme_spec(f"d{i}") for i in range(5)]
+        specs = deme_specs_to_rule_specs(demes)
+        # All touched_nodes are disjoint
+        all_nodes = [s.touched_nodes for s in specs]
+        for i in range(len(all_nodes)):
+            for j in range(i + 1, len(all_nodes)):
+                assert all_nodes[i] & all_nodes[j] == frozenset()
+
+    def test_cost_proportional_to_knobs(self):
+        demes = [_make_deme_spec("small", n_knobs=5), _make_deme_spec("large", n_knobs=50)]
+        specs = deme_specs_to_rule_specs(demes)
+        assert specs[1].cost > specs[0].cost
+
+    def test_empty(self):
+        assert deme_specs_to_rule_specs([]) == []
+
+
+class TestEstimateDemeCost:
+    def test_proportional(self):
+        assert estimate_deme_cost(20, 50) > estimate_deme_cost(10, 50)
