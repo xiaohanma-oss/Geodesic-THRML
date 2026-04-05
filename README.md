@@ -6,9 +6,9 @@
 
 > Geodesic inference control compiled to thermodynamic factor graphs.
 > Shared scheduling layer for
-> [PLN-THRML](https://github.com/mafeifei666666/PLN-THRML),
-> [QuantiMORK-THRML](https://github.com/mafeifei666666/QuantiMORK-THRML),
-> [ECAN-THRML](https://github.com/mafeifei666666/ECAN-THRML), and
+> [PLN-THRML](https://github.com/xiaohanma-oss/PLN-THRML),
+> [QuantiMORK-THRML](https://github.com/xiaohanma-oss/QuantiMORK-THRML),
+> [ECAN-THRML](https://github.com/xiaohanma-oss/ECAN-THRML), and
 > MOSES-THRML.
 
 ## Overview
@@ -58,7 +58,7 @@ where **f** = forward reachability (from premises), **g** = backward utility
 ## Installation
 
 ```bash
-git clone https://github.com/mafeifei666666/Geodesic-THRML.git
+git clone https://github.com/xiaohanma-oss/Geodesic-THRML.git
 cd Geodesic-THRML
 pip install -e ".[dev]"    # core + pytest + PLN bridge
 pytest                     # run all tests
@@ -120,5 +120,5 @@ tests/
 
 ## Contributing
 
-See [PLN-THRML CONTRIBUTING.md](https://github.com/mafeifei666666/PLN-THRML/blob/main/CONTRIBUTING.md)
+See [PLN-THRML CONTRIBUTING.md](https://github.com/xiaohanma-oss/PLN-THRML/blob/main/CONTRIBUTING.md)
 for shared contribution guidelines across the -THRML project family.

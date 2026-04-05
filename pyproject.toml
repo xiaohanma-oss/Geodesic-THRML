@@ -22,9 +22,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mafeifei666666/Geodesic-THRML"
-Repository = "https://github.com/mafeifei666666/Geodesic-THRML"
-Issues = "https://github.com/mafeifei666666/Geodesic-THRML/issues"
+Homepage = "https://github.com/xiaohanma-oss/Geodesic-THRML"
+Repository = "https://github.com/xiaohanma-oss/Geodesic-THRML"
+Issues = "https://github.com/xiaohanma-oss/Geodesic-THRML/issues"
 
 [tool.setuptools.packages.find]
 include = ["geodesic_thrml*"]
