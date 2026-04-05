@@ -26,6 +26,10 @@ Homepage = "https://github.com/xiaohanma-oss/Geodesic-THRML"
 Repository = "https://github.com/xiaohanma-oss/Geodesic-THRML"
 Issues = "https://github.com/xiaohanma-oss/Geodesic-THRML/issues"
 
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [tool.setuptools.packages.find]
 include = ["geodesic_thrml*"]
 

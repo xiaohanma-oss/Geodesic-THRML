@@ -105,9 +105,9 @@ tests/
 ├── test_capsules.py      # Merge idempotency
 ├── test_diagnostics.py   # Tree/cycle detection
 ├── test_invariants.py    # Five-theorem assertions
-├── test_weakness.py      # Weakness gauge + parallel groups
+├── test_scores.py        # Forward/backward factors + weakness gauge
 ├── test_controller.py    # Mixture-of-Energies + annealing
-└── test_pln_bridge.py    # PLN bridge regression
+└── test_bridges.py       # Bridge-specific regression tests
 ```
 
 ## Known limitations
