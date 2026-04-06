@@ -8,11 +8,11 @@ from geodesic_thrml.bridges.quantimork import (
 )
 from geodesic_thrml.bridges.ecan import (
     extract_ecan_snapshot, sti_to_forward_scores,
-    extract_hjb_factors, hjb_to_rule_specs,
+    extract_hjb_factors,
 )
 from geodesic_thrml.bridges.moses import (
     DemeSpec, compute_forward_reachability, compute_backward_compatibility,
-    deme_specs_to_rule_specs, estimate_deme_cost,
+    estimate_deme_cost,
 )
 
 
@@ -145,28 +145,6 @@ class TestHJBFactors:
             extract_hjb_factors(V, ["a", "b"])
 
 
-class TestHJBToRuleSpecs:
-    def test_produces_rule_specs(self):
-        V = np.array([5.0, 2.0, 0.0, 2.0, 5.0])
-        ids = ["a0", "a1", "goal", "a3", "a4"]
-        specs = hjb_to_rule_specs(V, ids)
-        assert len(specs) == 5
-        assert specs[2].name == "goal"
-
-    def test_custom_costs(self):
-        V = np.array([1.0, 0.0, 1.0])
-        ids = ["a", "b", "c"]
-        specs = hjb_to_rule_specs(V, ids, atom_costs=[1.0, 10.0, 1.0])
-        assert specs[1].cost == 10.0
-
-    def test_goal_atom_highest_g(self):
-        """Goal atom (V=0) should have highest conclusion_stv[0] (= g)."""
-        V = np.array([5.0, 2.0, 0.0, 2.0, 5.0])
-        ids = ["a0", "a1", "goal", "a3", "a4"]
-        specs = hjb_to_rule_specs(V, ids)
-        g_values = [s.conclusion_stv[0] for s in specs]
-        assert np.argmax(g_values) == 2
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  MOSES bridge (GEO-EVO)
@@ -221,35 +199,185 @@ class TestBackwardCompatibility:
         assert g[1] > g[2]  # healthy > random walk
 
 
-class TestDemeSpecsToRuleSpecs:
-    """Full GEO-EVO → RuleSpec conversion."""
-
-    def test_produces_rule_specs(self):
-        demes = [_make_deme_spec("d0", n_knobs=10), _make_deme_spec("d1", n_knobs=20)]
-        specs = deme_specs_to_rule_specs(demes)
-        assert len(specs) == 2
-        assert specs[0].name == "d0"
-        assert specs[1].name == "d1"
-
-    def test_demes_independent_parallel_safe(self):
-        """Different demes touch different nodes → weakness ≈ 0 → all parallel."""
-        demes = [_make_deme_spec(f"d{i}") for i in range(5)]
-        specs = deme_specs_to_rule_specs(demes)
-        # All touched_nodes are disjoint
-        all_nodes = [s.touched_nodes for s in specs]
-        for i in range(len(all_nodes)):
-            for j in range(i + 1, len(all_nodes)):
-                assert all_nodes[i] & all_nodes[j] == frozenset()
-
-    def test_cost_proportional_to_knobs(self):
-        demes = [_make_deme_spec("small", n_knobs=5), _make_deme_spec("large", n_knobs=50)]
-        specs = deme_specs_to_rule_specs(demes)
-        assert specs[1].cost > specs[0].cost
-
-    def test_empty(self):
-        assert deme_specs_to_rule_specs([]) == []
-
 
 class TestEstimateDemeCost:
     def test_proportional(self):
         assert estimate_deme_cost(20, 50) > estimate_deme_cost(10, 50)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  THRML bridge tests — proper posteriors (not uniform placeholders)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestHJBToRuleSpecsThrml:
+    """ECAN bridge: HJB V → THRML-sampled posteriors."""
+
+    def test_posterior_not_uniform(self):
+        """THRML posterior should NOT be uniform (unlike placeholder)."""
+        from geodesic_thrml.bridges.ecan import hjb_to_rule_specs_thrml
+        V = np.array([5.0, 2.0, 0.0, 2.0, 5.0])
+        ids = ["a0", "a1", "goal", "a3", "a4"]
+        specs = hjb_to_rule_specs_thrml(V, ids, k=16, n_batches=10, seed=42)
+        # Goal atom (V=0, highest g) should have non-uniform posterior
+        goal_spec = specs[2]
+        assert goal_spec.posterior.shape == (16,)
+        assert abs(goal_spec.posterior.sum() - 1.0) < 1e-5
+        # Not uniform: std should be significantly above uniform std
+        uniform_std = np.std(np.ones(16) / 16)
+        assert np.std(goal_spec.posterior) > uniform_std * 2
+
+    def test_goal_atom_posterior_peaked_higher_than_far(self):
+        """Goal atom (highest g) should have posterior peaked at higher bin than far atom."""
+        from geodesic_thrml.bridges.ecan import hjb_to_rule_specs_thrml
+        V = np.array([5.0, 2.0, 0.0, 2.0, 5.0])
+        ids = ["a0", "a1", "goal", "a3", "a4"]
+        specs = hjb_to_rule_specs_thrml(V, ids, k=16, n_batches=10, seed=42)
+        goal_peak = np.argmax(specs[2].posterior)   # V=0, highest g
+        far_peak = np.argmax(specs[0].posterior)     # V=5, lowest g
+        assert goal_peak > far_peak
+
+    def test_produces_correct_count(self):
+        from geodesic_thrml.bridges.ecan import hjb_to_rule_specs_thrml
+        V = np.array([3.0, 0.0, 3.0])
+        ids = ["a", "goal", "b"]
+        specs = hjb_to_rule_specs_thrml(V, ids, k=8)
+        assert len(specs) == 3
+        assert specs[1].name == "goal"
+
+    def test_consumable_by_controller(self):
+        """RuleSpecs should work with select_step_thrml."""
+        from geodesic_thrml.bridges.ecan import hjb_to_rule_specs_thrml
+        from geodesic_thrml.controller_thrml import select_step_thrml
+        from geodesic_thrml.scores import RuleSpec
+
+        V = np.array([5.0, 2.0, 0.0, 2.0, 5.0])
+        ids = ["a0", "a1", "goal", "a3", "a4"]
+        specs_raw = hjb_to_rule_specs_thrml(V, ids, k=16, n_batches=5)
+        # Convert to RuleSpec (they already are, but verify interface)
+        rule_specs = [
+            RuleSpec(
+                name=s.name, posterior=s.posterior,
+                conclusion_stv=s.conclusion_stv,
+                premise_confidences=s.premise_confidences,
+                cost=s.cost, touched_nodes=s.touched_nodes,
+            ) for s in specs_raw
+        ]
+        result = select_step_thrml(rule_specs, temperature=0.01, seed=42)
+        assert result.selected_name in ids
+
+
+class TestDemeSpecsToRuleSpecsThrml:
+    """MOSES bridge: deme fitness → THRML-sampled posteriors."""
+
+    def test_posterior_not_uniform(self):
+        """THRML posterior should NOT be uniform."""
+        from geodesic_thrml.bridges.moses import deme_specs_to_rule_specs_thrml
+        demes = [_make_deme_spec("good", fitness=0.9, acceptance=0.4),
+                 _make_deme_spec("bad", fitness=0.1, acceptance=0.01)]
+        specs = deme_specs_to_rule_specs_thrml(demes, k=16, n_batches=10, seed=42)
+        for spec in specs:
+            assert spec.posterior.shape == (16,)
+            assert abs(spec.posterior.sum() - 1.0) < 1e-5
+            uniform_std = np.std(np.ones(16) / 16)
+            assert np.std(spec.posterior) > uniform_std * 2
+
+    def test_good_deme_peaked_higher(self):
+        """Better deme (higher fitness + healthy acceptance) → posterior peaked higher."""
+        from geodesic_thrml.bridges.moses import deme_specs_to_rule_specs_thrml
+        demes = [_make_deme_spec("good", fitness=0.9, acceptance=0.4),
+                 _make_deme_spec("bad", fitness=0.1, acceptance=0.01)]
+        specs = deme_specs_to_rule_specs_thrml(demes, k=16, n_batches=10, seed=42)
+        good_peak = np.argmax(specs[0].posterior)
+        bad_peak = np.argmax(specs[1].posterior)
+        assert good_peak > bad_peak
+
+    def test_empty(self):
+        from geodesic_thrml.bridges.moses import deme_specs_to_rule_specs_thrml
+        assert deme_specs_to_rule_specs_thrml([]) == []
+
+    def test_consumable_by_controller(self):
+        """RuleSpecs should work with select_step_thrml."""
+        from geodesic_thrml.bridges.moses import deme_specs_to_rule_specs_thrml
+        from geodesic_thrml.controller_thrml import select_step_thrml
+        demes = [_make_deme_spec("a", fitness=0.5), _make_deme_spec("b", fitness=0.8)]
+        specs = deme_specs_to_rule_specs_thrml(demes, k=16, n_batches=5)
+        result = select_step_thrml(specs, temperature=0.01, seed=42)
+        assert result.selected_name in ["a", "b"]
+
+
+class TestPLNBridge:
+    """PLN bridge: wrap PLN-THRML results as RuleSpec (no re-sampling)."""
+
+    def test_single_result(self):
+        from geodesic_thrml.bridges.pln import pln_result_to_rule_spec
+        posterior = np.array([0.05, 0.1, 0.3, 0.35, 0.15, 0.05])
+        spec = pln_result_to_rule_spec(
+            name="modus_ponens",
+            posterior=posterior,
+            strength=0.7,
+            confidence=0.8,
+            premise_confidences=[0.9, 0.8],
+        )
+        assert spec.name == "modus_ponens"
+        np.testing.assert_array_equal(spec.posterior, posterior)
+        assert spec.conclusion_stv == (0.7, 0.8)
+        assert spec.premise_confidences == [0.9, 0.8]
+        assert spec.cost == 1.0
+
+    def test_batch_results(self):
+        from geodesic_thrml.bridges.pln import pln_results_to_rule_specs
+        results = [
+            {"name": "mp", "posterior": np.ones(16)/16,
+             "strength": 0.7, "confidence": 0.8,
+             "premise_confidences": [0.9]},
+            {"name": "ded", "posterior": np.ones(16)/16,
+             "strength": 0.6, "confidence": 0.7,
+             "premise_confidences": [0.8], "cost": 2.0},
+        ]
+        specs = pln_results_to_rule_specs(results)
+        assert len(specs) == 2
+        assert specs[0].name == "mp"
+        assert specs[1].cost == 2.0
+
+    def test_consumable_by_controller(self):
+        from geodesic_thrml.bridges.pln import pln_result_to_rule_spec
+        from geodesic_thrml.controller_thrml import select_step_thrml
+        specs = [
+            pln_result_to_rule_spec("a", np.ones(16)/16, 0.7, 0.8, [0.9]),
+            pln_result_to_rule_spec("b", np.ones(16)/16, 0.3, 0.4, [0.5]),
+        ]
+        result = select_step_thrml(specs, temperature=0.01, seed=42)
+        assert result.selected_name in ["a", "b"]
+
+
+class TestQuantiMORKCascadeSolverThrml:
+    """QuantiMORK bridge: wavelet levels → THRML unified cascade."""
+
+    def test_produces_solver(self):
+        from geodesic_thrml.bridges.quantimork import (
+            make_quantimork_cascade_solver_thrml, WaveletLevelSpec,
+        )
+        specs = [
+            WaveletLevelSpec(level=2, band="detail", dim=8, weight_shape=(8, 8),
+                             max_connections=5, energy_params={"weight": np.eye(8) * 0.5}),
+            WaveletLevelSpec(level=1, band="detail", dim=16, weight_shape=(16, 16),
+                             max_connections=5, energy_params={"weight": np.eye(16) * 0.3}),
+        ]
+        solver = make_quantimork_cascade_solver_thrml(specs)
+        assert callable(solver)
+
+    def test_solver_returns_valid_posterior(self):
+        from geodesic_thrml.bridges.quantimork import (
+            make_quantimork_cascade_solver_thrml, WaveletLevelSpec,
+        )
+        specs = [
+            WaveletLevelSpec(level=2, band="detail", dim=8, weight_shape=(8, 8),
+                             max_connections=5, energy_params={"weight": np.eye(8) * 0.5}),
+            WaveletLevelSpec(level=1, band="detail", dim=16, weight_shape=(16, 16),
+                             max_connections=5, energy_params={"weight": np.eye(16) * 0.3}),
+        ]
+        solver = make_quantimork_cascade_solver_thrml(specs)
+        posterior, s, c = solver(8, None)
+        assert posterior.shape == (8,)
+        assert abs(posterior.sum() - 1.0) < 1e-5
+        assert 0.0 < s < 1.0

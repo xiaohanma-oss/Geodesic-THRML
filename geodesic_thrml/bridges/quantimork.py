@@ -23,7 +23,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from geodesic_thrml.curriculum import ResolutionLevel
+from geodesic_thrml.types import ResolutionLevel
 
 
 @dataclass
@@ -121,3 +121,117 @@ def estimate_level_cost(spec: WaveletLevelSpec) -> float:
     if spec.weight_shape:
         return float(np.prod(spec.weight_shape))
     return 1.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  THRML cascade solver
+# ═══════════════════════════════════════════════════════════════════════════
+
+def make_quantimork_cascade_solver_thrml(
+    wavelet_specs: list[WaveletLevelSpec],
+    coupling_precision: float | None = None,
+) -> "Callable":
+    """Build unified THRML cascade graph from wavelet level specifications.
+
+    Maps QuantiMORK's wavelet hierarchy directly to curriculum_thrml's
+    unified factor graph:
+    - Each wavelet level → one CategoricalNode (K = dim at that level)
+    - Wavelet energy_params → per-level CategoricalEBMFactor prior weights
+    - Inter-level structure → non-square coupling factors
+
+    Instead of generic Beta priors, uses the actual wavelet weight matrices
+    from WaveletLevelSpec.energy_params to set per-level bias.
+
+    Args:
+        wavelet_specs: from collect_wavelet_level_specs()
+        coupling_precision: precision for inter-level coupling (default: auto)
+
+    Returns:
+        A callable(k, prior_weights_or_None) → (posterior, s, c)
+
+    References:
+        - quantimork_thrml.thrml_verify: build_single_level_graph() (per-level pattern)
+        - curriculum_thrml: build_unified_cascade_graph() (unified cascade)
+    """
+    import jax.numpy as jnp
+    from geodesic_thrml.curriculum_thrml import (
+        build_unified_cascade_graph,
+        _run_unified_sampling,
+        _extract_level_posterior,
+        _posterior_to_stv,
+    )
+
+    ladder = wavelet_to_resolution_ladder(wavelet_specs)
+
+    # Extract per-level prior weights from wavelet energy params
+    level_priors = {}
+    for spec in wavelet_specs:
+        if spec.energy_params is not None and "weight" in spec.energy_params:
+            weight = spec.energy_params["weight"]
+            # Diagonal of weight matrix → per-bin energy (self-energy)
+            if hasattr(weight, 'numpy'):
+                weight = weight.numpy()
+            w = np.asarray(weight, dtype=np.float64)
+            if w.ndim == 2:
+                diag = np.diag(w) if w.shape[0] == w.shape[1] else w.mean(axis=0)
+            else:
+                diag = w
+            # Center for stability
+            diag = diag - diag.mean()
+            level_priors[spec.dim] = diag
+
+    def solve(k: int, prior_weights: np.ndarray | None):
+        """Solve at resolution k using the unified factor graph."""
+        # Find the matching level in the ladder
+        target_levels = [l for l in ladder if l.k == k]
+        if not target_levels:
+            # Fallback: single-level solve
+            single_ladder = [ResolutionLevel(k=k)]
+            graph = build_unified_cascade_graph(single_ladder)
+        else:
+            graph = build_unified_cascade_graph(
+                ladder, coupling_precision=coupling_precision)
+
+        # Inject wavelet-derived priors if available
+        if k in level_priors:
+            from thrml.models.discrete_ebm import CategoricalEBMFactor
+            from thrml.block_management import Block
+            wp = jnp.array(level_priors[k][:k])  # truncate/pad to k
+            if len(wp) < k:
+                wp = jnp.pad(wp, (0, k - len(wp)))
+            wp = wp - jnp.mean(wp)
+            # Find the node for this level
+            for i, level in enumerate(graph["ladder"]):
+                if level.k == k:
+                    factor = CategoricalEBMFactor(
+                        [Block([graph["nodes"][i]])], wp[None, :])
+                    graph["factors"].append(factor)
+                    break
+
+        # Also inject external prior_weights if provided
+        if prior_weights is not None:
+            from thrml.models.discrete_ebm import CategoricalEBMFactor
+            from thrml.block_management import Block
+            pw = jnp.array(prior_weights)
+            for i, level in enumerate(graph["ladder"]):
+                if level.k == k:
+                    factor = CategoricalEBMFactor(
+                        [Block([graph["nodes"][i]])], pw[None, :])
+                    graph["factors"].append(factor)
+                    break
+
+        samples = _run_unified_sampling(graph, seed=42)
+
+        # Extract posterior from the target level
+        for i, level in enumerate(graph["ladder"]):
+            if level.k == k:
+                posterior = _extract_level_posterior(samples, i, k)
+                s, c = _posterior_to_stv(posterior, k)
+                return np.array(posterior), float(s), float(c)
+
+        # Fallback: extract from last level
+        posterior = _extract_level_posterior(samples, len(ladder) - 1, k)
+        s, c = _posterior_to_stv(posterior, k)
+        return np.array(posterior), float(s), float(c)
+
+    return solve

@@ -115,41 +115,6 @@ def extract_hjb_factors(
     )
 
 
-def hjb_to_rule_specs(
-    V_final: np.ndarray,
-    atom_ids: list[str],
-    atom_costs: Sequence[float] | None = None,
-) -> list[RuleSpec]:
-    """Convert HJB value function to RuleSpec list for geodesic controller.
-
-    Each atom becomes a candidate "step" — the controller decides which
-    atoms' inference neighborhoods to expand next.
-
-    Args:
-        V_final: solved HJB value function
-        atom_ids: identifiers for each atom
-        atom_costs: per-atom computational cost (default 1.0 each)
-
-    Returns:
-        List of RuleSpec for controller.select_step().
-    """
-    factors = extract_hjb_factors(V_final, atom_ids)
-    costs = atom_costs if atom_costs is not None else [1.0] * len(atom_ids)
-
-    specs = []
-    for i, aid in enumerate(atom_ids):
-        specs.append(RuleSpec(
-            name=aid,
-            posterior=np.ones(16) / 16,  # placeholder — ECAN uses V, not histograms
-            conclusion_stv=(float(factors.g_scores[i]),
-                            float(factors.f_scores[i])),
-            premise_confidences=[float(factors.f_scores[i])],
-            cost=float(costs[i]),
-            touched_nodes=frozenset([aid]),
-        ))
-    return specs
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 #  Mode 2: STI snapshot (simplified fallback)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -197,6 +162,114 @@ def extract_ecan_snapshot(
         atom_ids=list(atom_ids),
         total_sti=float(sti.sum()),
     )
+
+
+def hjb_to_rule_specs_thrml(
+    V_final: np.ndarray,
+    atom_ids: list[str],
+    atom_costs: Sequence[float] | None = None,
+    k: int = 16,
+    n_batches: int = 20,
+    seed: int = 42,
+) -> list[RuleSpec]:
+    """Convert HJB value function to RuleSpec with THRML-sampled posteriors.
+
+    Instead of placeholder posteriors (np.ones(16)/16), encodes each atom's
+    value V(x) as a CategoricalNode bias and samples via THRML to produce
+    a proper posterior distribution.
+
+    V(x) is already an energy function — exp(-V/scale) is a Boltzmann
+    distribution.  Encoding it as a CategoricalEBMFactor bias lets THRML
+    hardware sample from the exact distribution.
+
+    SB mapping (whitepaper §5.3):
+        g(x) = exp(-V(x)/scale) → prior bias for CategoricalNode
+        f(x) = |∇V(x)|         → premise_confidences
+        Posterior from THRML Gibbs → proper histogram (not uniform)
+
+    Args:
+        V_final: solved HJB value function, shape [Ny, Nx] or [N]
+        atom_ids: identifiers for each atom position
+        atom_costs: per-atom computational cost (default 1.0 each)
+        k: bin count for posterior discretization
+        n_batches: THRML sampling batches
+        seed: random seed
+
+    Returns:
+        List of RuleSpec with THRML-sampled posteriors.
+
+    References:
+        - Hyperon whitepaper §5.3: ECAN meets optimal transport
+        - tsu-architecture §III: Boltzmann machine energy encoding
+    """
+    import jax
+    import jax.numpy as jnp
+    from thrml.pgm import CategoricalNode
+    from thrml.block_management import Block
+    from thrml.block_sampling import (
+        BlockGibbsSpec, SamplingSchedule, sample_states,
+    )
+    from thrml.models.discrete_ebm import (
+        CategoricalEBMFactor, CategoricalGibbsConditional,
+    )
+    from thrml.factor import FactorSamplingProgram
+
+    factors = extract_hjb_factors(V_final, atom_ids)
+    costs = atom_costs if atom_costs is not None else [1.0] * len(atom_ids)
+
+    schedule = SamplingSchedule(n_warmup=200, n_samples=500, steps_per_sample=2)
+
+    specs = []
+    for i, aid in enumerate(atom_ids):
+        # Encode g(x) = exp(-V(x)/scale) as a K-bin bias
+        # Map goal proximity to bin space: high g → peaked at high bins
+        g_score = float(factors.g_scores[i])
+        f_score = float(factors.f_scores[i])
+
+        # Build bias: peaked around g_score position in [0,1]
+        centers = np.linspace(0.5 / k, 1.0 - 0.5 / k, k)
+        bias = -((centers - g_score) ** 2) * k  # quadratic, peaked at g_score
+        bias = bias - bias.mean()
+        bias_jnp = jnp.array(bias)
+
+        # Single-node factor graph
+        node = CategoricalNode()
+        factor = CategoricalEBMFactor([Block([node])], bias_jnp[None, :])
+        free_blocks = [Block([node])]
+        spec = BlockGibbsSpec(free_blocks, [])
+        sampler = CategoricalGibbsConditional(n_categories=k)
+        program = FactorSamplingProgram(
+            gibbs_spec=spec, samplers=[sampler],
+            factors=[factor], other_interaction_groups=[],
+        )
+
+        # Sample
+        key = jax.random.PRNGKey(seed + i)
+        init_state = [jax.random.randint(
+            key, (n_batches, 1), minval=0, maxval=k, dtype=jnp.uint8)]
+        keys = jax.random.split(key, n_batches)
+        samples = jax.jit(jax.vmap(
+            lambda s, k_: sample_states(
+                k_, program, schedule, s, [], list(free_blocks))
+        ))(init_state, keys)
+
+        # Extract posterior
+        leaves = jax.tree.leaves(samples)
+        flat = jnp.concatenate([jnp.ravel(leaf) for leaf in leaves])
+        flat = flat.astype(jnp.int32)
+        counts = jnp.bincount(flat, length=k).astype(jnp.float32)
+        posterior = np.array(counts / jnp.sum(counts))
+
+        specs.append(RuleSpec(
+            name=aid,
+            posterior=posterior,
+            conclusion_stv=(g_score, f_score),
+            premise_confidences=[f_score],
+            cost=float(costs[i]),
+            touched_nodes=frozenset([aid]),
+        ))
+
+    return specs
 
 
 def sti_to_forward_scores(snapshot: ECANSnapshot) -> np.ndarray:

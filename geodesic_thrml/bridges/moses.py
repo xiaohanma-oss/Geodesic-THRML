@@ -165,43 +165,115 @@ def compute_backward_compatibility(
     return scores / total if total > 0 else np.ones(len(scores)) / len(scores)
 
 
-def deme_specs_to_rule_specs(
+def deme_specs_to_rule_specs_thrml(
     deme_specs: list[DemeSpec],
     target_behavior_fn: Callable[[np.ndarray], float] | None = None,
     n_chains: int = 50,
+    k: int = 16,
+    n_batches: int = 20,
+    seed: int = 42,
 ) -> list[RuleSpec]:
-    """Convert deme specs to RuleSpec for the geodesic controller.
+    """Convert deme specs to RuleSpec with THRML-sampled posteriors.
 
-    Implements the full GEO-EVO mapping:
-        f = forward_reachability (fitness-based)
-        g = backward_compatibility (target-behavior-based)
-        cost = n_knobs × n_chains
-        touched_nodes = {deme_id} (different demes are independent → parallel-safe)
+    Instead of placeholder posteriors, encodes each deme's fitness (f) and
+    goal proximity (g) as a two-node factor graph coupled by a
+    CategoricalEBMFactor encoding the ρ = f·g joint structure.
+    THRML Gibbs sampling produces proper posteriors for each deme.
+
+    GEO-EVO mapping (whitepaper §6.2.1):
+        f(deme) = forward reachability → Node 0 bias
+        g(deme) = backward compatibility → Node 1 bias
+        ρ = f·g coupling → pairwise CategoricalEBMFactor
+        Joint posterior from THRML → proper histogram
 
     Args:
-        deme_specs: list of DemeSpec from collect_deme_specs
+        deme_specs: from collect_deme_specs()
         target_behavior_fn: optional target behavior evaluation
-        n_chains: number of parallel MH chains per deme (for cost estimation)
+        n_chains: parallel MH chains per deme (for cost estimation)
+        k: bin count for posterior discretization
+        n_batches: THRML sampling batches
+        seed: random seed
 
     Returns:
-        List of RuleSpec for controller.select_step().
+        List of RuleSpec with THRML-sampled posteriors.
+
+    References:
+        - Hyperon whitepaper §6.2.1: GEO-EVO
+        - genenergy-logic §3.3: ρ = f·g geodesic product
     """
+    import jax.numpy as jnp
+    from thrml.pgm import CategoricalNode
+    from thrml.block_management import Block
+    from thrml.models.discrete_ebm import CategoricalEBMFactor
+
+    from geodesic_thrml.sampling import (
+        SamplingConfig,
+        assemble_sampling_program,
+        run_gibbs_sampling,
+        extract_posterior,
+    )
+
     if not deme_specs:
         return []
 
     f_scores = compute_forward_reachability(deme_specs)
     g_scores = compute_backward_compatibility(deme_specs, target_behavior_fn)
 
+    moses_config = SamplingConfig(
+        n_warmup=200, n_samples=500, steps_per_sample=2, n_batches=n_batches)
+    centers = np.linspace(0.5 / k, 1.0 - 0.5 / k, k)
+
     specs = []
     for i, d in enumerate(deme_specs):
+        f_val = float(f_scores[i])
+        g_val = float(g_scores[i])
+
+        # Node 0: f-factor (forward reachability), peaked at f_val
+        f_bias = -((centers - f_val) ** 2) * k
+        f_bias = f_bias - f_bias.mean()
+
+        # Node 1: g-factor (backward compatibility), peaked at g_val
+        g_bias = -((centers - g_val) ** 2) * k
+        g_bias = g_bias - g_bias.mean()
+
+        # Build two-node factor graph with ρ = f·g coupling
+        f_node = CategoricalNode()
+        g_node = CategoricalNode()
+
+        f_factor = CategoricalEBMFactor(
+            [Block([f_node])], jnp.array(f_bias)[None, :])
+        g_factor = CategoricalEBMFactor(
+            [Block([g_node])], jnp.array(g_bias)[None, :])
+
+        # Coupling: ρ(i,j) = -|center_i - center_j|² encourages agreement
+        diff = centers[:, None] - centers[None, :]
+        coupling_W = -(diff ** 2) * (k / 4)
+        coupling_W = coupling_W - coupling_W.mean(axis=1, keepdims=True)
+        coupling_factor = CategoricalEBMFactor(
+            [Block([f_node]), Block([g_node])],
+            jnp.array(coupling_W)[None, :, :])
+
+        free_blocks = [Block([f_node]), Block([g_node])]
+        program = assemble_sampling_program(
+            free_blocks, [], [f_factor, g_factor, coupling_factor], k=k)
+
+        # Sample via shared facility
+        samples = run_gibbs_sampling(
+            program, free_blocks,
+            config=moses_config, k=k, seed=seed + i)
+
+        # Extract posterior from g-node (backward = goal-directed)
+        posterior = extract_posterior(samples, 1, 0, k)
+
         specs.append(RuleSpec(
             name=d.deme_id,
-            posterior=np.ones(16) / 16,  # placeholder — MOSES uses bits, not histograms
-            conclusion_stv=(float(f_scores[i]), float(g_scores[i])),
-            premise_confidences=[float(f_scores[i])],
+            posterior=posterior,
+            conclusion_stv=(f_val, g_val),
+            premise_confidences=[f_val],
             cost=float(d.n_knobs * n_chains),
-            touched_nodes=frozenset([d.deme_id]),  # demes are independent → weakness ≈ 0
+            touched_nodes=frozenset([d.deme_id]),
         ))
+
     return specs
 
 

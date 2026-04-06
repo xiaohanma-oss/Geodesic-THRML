@@ -2,119 +2,86 @@
 geodesic_thrml.bridges.pln — PLN-THRML bridge
 ===============================================
 
-Adapts PLN-THRML's beta engine for use with the geodesic curriculum
-(coarse-to-fine K cascade) and controller (rule posterior precomputation).
-
-Current simplification (adequate for single-rule scope):
-    f = Σ c2w(premise_confidence)  — numerical proxy for forward reachability
-    g = exp(-‖conclusion - goal‖²) — Euclidean proxy for backward utility
-
-Whitepaper §6.1 full version (for future multi-step inference):
-    f = PLN forward chaining reachability from premises
-    g = PLN backward chaining utility toward goals
-    "implement inference as 'geodesic control': maintain both forward
-    factors (from premises) and backward factors (from goals) and move
-    along steps that progress both"
-
-Upgrade path: when PLN-THRML introduces multi-step chaining (possibly
-via trueagi-io/chaining integration), replace the numerical proxies
-with true chaining-based f and g.
+Translates PLN-THRML's inference results into RuleSpec for the
+geodesic controller.  Does NOT re-do PLN inference — PLN-THRML
+already builds factor graphs, runs THRML Gibbs sampling, and
+returns (posterior, strength, confidence).  This bridge simply
+wraps those results as RuleSpec.
 
 References:
-    - pln_thrml.beta: Beta-discretized factor graphs for PLN inference
+    - pln_thrml.beta: sample_and_measure() → (posterior, s, c)
     - Hyperon whitepaper §6.1: PLN + geodesic control
-    - Hyperon whitepaper §6.1.1: PLN control via quantale-annotated factor graphs
 """
 
 from __future__ import annotations
 
-from typing import Callable
-
 import numpy as np
 
-
-def make_pln_cascade_solver(
-    build_fn: Callable,
-    sample_fn: Callable,
-    marginal_fn: Callable,
-    target_node_fn: Callable,
-    posterior_to_stv_fn: Callable,
-    beta_prior_weights_fn: Callable,
-    **fixed_params,
-) -> Callable:
-    """Create a solve_fn compatible with curriculum.cascade_solve.
-
-    This wraps PLN-THRML's build → sample → measure pipeline into
-    the (k, prior_weights) → (posterior, s, c) interface.
-
-    Args:
-        build_fn: graph builder (e.g., build_beta_chain) — must accept k= kwarg
-        sample_fn: run_beta_sampling
-        marginal_fn: estimate_beta_marginal
-        target_node_fn: callable(graph) -> target node for measurement
-        posterior_to_stv_fn: posterior_to_stv from pln_thrml.beta
-        beta_prior_weights_fn: beta_prior_weights from pln_thrml.beta
-        **fixed_params: fixed parameters passed to build_fn
-
-    Returns:
-        A callable(k, prior_weights_or_None) -> (posterior, s, c)
-    """
-    def solve(k: int, prior_weights: np.ndarray | None):
-        graph = build_fn(**fixed_params, k=k)
-        samples = sample_fn(graph)
-        target = target_node_fn(graph)
-        posterior, s, c = marginal_fn(samples, graph, target, k=k)
-        return np.array(posterior), float(s), float(c)
-
-    return solve
+from geodesic_thrml.scores import RuleSpec
 
 
-def collect_pln_rule_specs(
-    premises_stv: list[tuple[float, float]],
-    rules: list[dict],
-    k: int = 16,
-    sample_fn: Callable | None = None,
-) -> list[dict]:
-    """Precompute posteriors for each candidate PLN rule.
+def pln_result_to_rule_spec(
+    name: str,
+    posterior: np.ndarray,
+    strength: float,
+    confidence: float,
+    premise_confidences: list[float],
+    cost: float = 1.0,
+    touched_nodes: frozenset[str] = frozenset(),
+) -> RuleSpec:
+    """Wrap a PLN-THRML sampling result as RuleSpec.
 
-    Each rule spec contains:
-        - name: rule identifier
-        - posterior: K-bin posterior histogram
-        - conclusion_stv: (strength, confidence)
-        - premise_confidences: list of input confidences
-        - cost: computational cost estimate
+    PLN-THRML's sample_and_measure() (or estimate_beta_marginal())
+    already returns a proper posterior from THRML Gibbs sampling.
+    This function packages it for the geodesic controller — no
+    re-sampling needed.
 
     Args:
-        premises_stv: list of (strength, confidence) for available premises
-        rules: list of rule dicts, each with 'name', 'build_fn', 'target_fn'
-        k: bin count
-        sample_fn: sampling function (default: pln_thrml.beta.run_beta_sampling)
+        name: rule identifier (e.g., "modus_ponens")
+        posterior: K-bin posterior histogram from PLN-THRML sampling
+        strength: posterior mean (from PLN-THRML moment matching)
+        confidence: posterior concentration (from PLN-THRML)
+        premise_confidences: confidences of input premises
+        cost: computational cost of applying this rule
+        touched_nodes: graph nodes this rule reads/writes
 
     Returns:
-        List of rule spec dicts, one per applicable rule.
+        RuleSpec ready for controller.select_step_thrml().
     """
-    specs = []
-    for rule in rules:
-        try:
-            graph = rule["build_fn"](k=k)
-            if sample_fn is None:
-                from pln_thrml.beta import run_beta_sampling
-                sample_fn = run_beta_sampling
-            samples = sample_fn(graph)
-            target = rule["target_fn"](graph)
+    return RuleSpec(
+        name=name,
+        posterior=np.asarray(posterior),
+        conclusion_stv=(strength, confidence),
+        premise_confidences=list(premise_confidences),
+        cost=cost,
+        touched_nodes=touched_nodes,
+    )
 
-            from pln_thrml.beta import estimate_beta_marginal
-            posterior, s, c = estimate_beta_marginal(samples, graph, target, k=k)
 
-            specs.append({
-                "name": rule["name"],
-                "posterior": np.array(posterior),
-                "conclusion_stv": (float(s), float(c)),
-                "premise_confidences": [p[1] for p in premises_stv],
-                "cost": rule.get("cost", 1.0),
-            })
-        except Exception:
-            # Rule not applicable with current premises — skip
-            continue
+def pln_results_to_rule_specs(
+    results: list[dict],
+) -> list[RuleSpec]:
+    """Batch-convert PLN-THRML results to RuleSpec list.
 
-    return specs
+    Convenience wrapper for multiple rules.  Each dict should have:
+        name, posterior, strength, confidence, premise_confidences,
+        and optionally cost, touched_nodes.
+
+    Args:
+        results: list of dicts from PLN-THRML inference
+
+    Returns:
+        List of RuleSpec for controller.select_step_thrml().
+    """
+    return [
+        pln_result_to_rule_spec(
+            name=r["name"],
+            posterior=r["posterior"],
+            strength=r["strength"],
+            confidence=r["confidence"],
+            premise_confidences=r["premise_confidences"],
+            cost=r.get("cost", 1.0),
+            touched_nodes=r.get("touched_nodes", frozenset()),
+        )
+        for r in results
+    ]

@@ -7,7 +7,7 @@ Contributions are welcome! This document covers the essentials.
 ```bash
 git clone https://github.com/xiaohanma-oss/Geodesic-THRML.git
 cd Geodesic-THRML
-pip install -e ".[dev]"          # installs jax, numpy, pln-thrml, pytest
+pip install -e ".[dev]"          # installs jax, numpy, thrml, pytest
 ```
 
 ## Running tests
