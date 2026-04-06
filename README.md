@@ -90,12 +90,12 @@ Without it, each module greedily consumes all the budget.
 </details>
 
 **Technical summary**: The geodesic controller compiles the Hyperon whitepaper's
-cross-paradigm Occam bias (genenergy-logic §5) to a single-node THRML factor
+cross-paradigm Occam bias (genenergy-logic §6; energy formula from whitepaper §5.2) to a single-node THRML factor
 graph: candidate steps from PLN, QuantiMORK, ECAN, and MOSES are scored by
 forward reachability **f** and backward utility **g**, combined into geodesic
 energy E = −(log f + log g)/T + λ·cost, and encoded as a CategoricalNode bias
 for TSU Gibbs sampling. The product ρ = f·g is a Noether invariant (Thm 3.1),
-and five O(1) runtime checks guard evidence conservation. `sampling.py` also
+and five runtime checks guard evidence conservation. `sampling.py` also
 provides shared THRML utilities (graph assembly, Gibbs sampling, posterior
 extraction) that sibling projects import directly.
 
